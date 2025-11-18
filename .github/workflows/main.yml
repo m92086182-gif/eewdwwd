@@ -1,0 +1,216 @@
+name: Windows RDP Server (Public)
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'مدة التشغيل (ساعات)'
+        required: true
+        default: '72'
+        type: choice
+        options:
+        - '24'
+        - '48'
+        - '72'
+        - '168'
+
+env:
+  CUSTOM_PORT: 3389
+  USERNAME: 'AdminRDP'
+  SESSION_DURATION: 72
+
+jobs:
+  deploy-public-rdp:
+    runs-on: windows-latest
+    timeout-minutes: ${{ fromJson('{"24": 1440, "48": 2880, "72": 4320, "168": 10080}[github.event.inputs.duration] || 4320') }}
+    
+    steps:
+    - name: التحقق من المواصفات
+      run: |
+        echo "🖥️ مواصفات السيرفر:"
+        systeminfo | findstr /C:"Total Physical Memory"
+        systeminfo | findstr /C:"Processor(s)"
+        echo "💾 المساحة المتاحة:"
+        fsutil fsinfo drives
+        wmic logicaldisk get size,freespace,caption
+
+    - name: تعطيل إعدادات الأمان المؤقتة للـRDP
+      run: |
+        # تفعيل RDP
+        Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0 -Force
+        
+        # تعطيل NLA مؤقتاً للاتصال السهل
+        Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 0 -Force
+        
+        # إعدادات الجلسات المتعددة
+        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fSingleSessionPerUser" -Value 0 -Force
+
+    - name: فتح منافذ RDP في الجدار الناري
+      run: |
+        # حذف أي قواعد موجودة مسبقاً
+        netsh advfirewall firewall delete rule name="PublicRDP" 2>&1 | Out-Null
+        
+        # فتح منفذ RDP الافتراضي
+        netsh advfirewall firewall add rule name="PublicRDP" dir=in action=allow protocol=TCP localport=$env:CUSTOM_PORT
+        
+        # فتح منفذ UDP أيضاً
+        netsh advfirewall firewall add rule name="PublicRDP-UDP" dir=in action=allow protocol=UDP localport=$env:CUSTOM_PORT
+        
+        # إظهار القواعد المضافَة
+        netsh advfirewall firewall show rule name="PublicRDP"
+
+    - name: إنشاء مستخدم مسؤول بكلمة مرور قوية
+      run: |
+        # إنشاء كلمة مرور قوية عشوائية
+        Add-Type -AssemblyName System.Web
+        $password = [System.Web.Security.Membership]::GeneratePassword(16, 4)
+        $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+        
+        # حذف المستخدم إذا كان موجوداً مسبقاً
+        try {
+            Remove-LocalUser -Name $env:USERNAME -ErrorAction SilentlyContinue
+        } catch { }
+        
+        # إنشاء المستخدم الجديد
+        New-LocalUser -Name $env:USERNAME -Password $securePassword -AccountNeverExpires
+        Add-LocalGroupMember -Group "Administrators" -Member $env:USERNAME
+        Add-LocalGroupMember -Group "Remote Desktop Users" -Member $env:USERNAME
+        
+        # تفعيل حساب Administrator المدمج
+        Enable-LocalUser -Name "Administrator"
+        $adminPassword = [System.Web.Security.Membership]::GeneratePassword(16, 4)
+        $adminSecurePassword = ConvertTo-SecureString $adminPassword -AsPlainText -Force
+        Set-LocalUser -Name "Administrator" -Password $adminSecurePassword
+        
+        # حفظ بيانات الدخول في متغيرات الآمنة
+        echo "RDP_USERNAME=$env:USERNAME" >> $env:GITHUB_ENV
+        echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+        echo "ADMIN_PASSWORD=$adminPassword" >> $env:GITHUB_ENV
+
+    - name: الحصول على IP العام وتعيين الاسم
+      run: |
+        # الحصول على IP العام
+        $publicIP = (Invoke-RestMethod -Uri "https://api.ipify.org").Trim()
+        echo "PUBLIC_IP=$publicIP" >> $env:GITHUB_ENV
+        
+        # تعيين اسم جهاز مميز
+        $hostname = "GH-RDP-$env:GITHUB_RUN_ID"
+        Rename-Computer -NewName $hostname -Force
+        echo "COMPUTER_NAME=$hostname" >> $env:GITHUB_ENV
+
+    - name: تحسين أداء Windows للسيرفر
+      run: |
+        # تحسين إعدادات الأداء
+        powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  # High performance
+        
+        # تعطيل السكون
+        powercfg -change -standby-timeout-ac 0
+        powercfg -change -hibernate-timeout-ac 0
+        
+        # تحسين إعدادات RDP
+        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "MaxInstanceCount" -Value 20
+        
+        # تعطيل Cortana لتوفير الموارد
+        Get-AppxPackage -AllUsers | where Name -like "*Cortana*" | Remove-AppxPackage -ErrorAction SilentlyContinue
+
+    - name: تثبيت البرامج الأساسية
+      run: |
+        # تحميل وتثبيت Google Chrome
+        $chromeInstaller = "$env:TEMP\chrome_installer.exe"
+        Invoke-WebRequest "https://dl.google.com/chrome/install/latest/chrome_installer.exe" -OutFile $chromeInstaller
+        Start-Process -FilePath $chromeInstaller -Args "/silent /install" -Wait
+        Remove-Item $chromeInstaller
+        
+        # تثبيت VLC Media Player
+        $vlcInstaller = "$env:TEMP\vlc_installer.exe"
+        Invoke-WebRequest "https://get.videolan.org/vlc/3.0.20/win64/vlc-3.0.20-win64.exe" -OutFile $vlcInstaller
+        Start-Process -FilePath $vlcInstaller -Args "/S" -Wait
+        Remove-Item $vlcInstaller
+        
+        # تثبيت 7-Zip
+        $7zipInstaller = "$env:TEMP\7zip_installer.exe"
+        Invoke-WebRequest "https://www.7-zip.org/a/7z2408-x64.exe" -OutFile $7zipInstaller
+        Start-Process -FilePath $7zipInstaller -Args "/S" -Wait
+        Remove-Item $7zipInstaller
+
+    - name: تشغيل وإعداد الخدمات
+      run: |
+        # إعادة تشغيل خدمات RDP
+        Restart-Service -Name "TermService" -Force
+        Restart-Service -Name "SessionEnv" -Force
+        Restart-Service -Name "UmRdpService" -Force
+        
+        # تعطيل Windows Update مؤقتاً
+        Set-Service -Name "wuauserv" -StartupType Manual
+        Stop-Service -Name "wuauserv" -Force
+
+    - name: اختبار الاتصال وعرض المعلومات
+      run: |
+        # اختبار منفذ RDP
+        $testResult = Test-NetConnection -ComputerName $env:PUBLIC_IP -Port $env:CUSTOM_PORT -InformationLevel Detailed
+        $portStatus = if ($testResult.TcpTestSucceeded) { "✅ مفتوح" } else { "❌ مغلق" }
+        
+        # عرض معلومات الاتصال
+        Write-Host ""
+        Write-Host "=" * 60
+        Write-Host "🎯 RDP السيرفر جاهز للاستخدام!"
+        Write-Host "=" * 60
+        Write-Host "🌐 IP العام: $env:PUBLIC_IP"
+        Write-Host "🚪 المنفذ: $env:CUSTOM_PORT"
+        Write-Host "🔒 حالة المنفذ: $portStatus"
+        Write-Host "👤 المستخدم الرئيسي: $env:RDP_USERNAME"
+        Write-Host "🔑 كلمة المرور: $env:RDP_PASSWORD"
+        Write-Host "👑 المسؤول: Administrator"
+        Write-Host "🔑 كلمة مرور المسؤول: $env:ADMIN_PASSWORD"
+        Write-Host "💻 اسم الجهاز: $env:COMPUTER_NAME"
+        Write-Host "⏰ المدة المتبقية: ${{ github.event.inputs.duration }} ساعة"
+        Write-Host "=" * 60
+        Write-Host ""
+
+    - name: نظام المراقبة والتجديد التلقائي
+      run: |
+        $endTime = (Get-Date).AddHours(${{ github.event.inputs.duration }})
+        $checkInterval = 300 # 5 دقائق
+        
+        while ((Get-Date) -lt $endTime) {
+            $timeLeft = $endTime - (Get-Date)
+            $hoursLeft = [math]::Round($timeLeft.TotalHours, 1)
+            
+            # تحديث معلومات الحالة
+            Write-Host "[$(Get-Date)] ✅ السيرفر يعمل - $hoursLeft ساعة متبقية"
+            
+            # اختبار الاتصال
+            try {
+                $test = Test-NetConnection -ComputerName $env:PUBLIC_IP -Port $env:CUSTOM_PORT -WarningAction SilentlyContinue
+                if (-not $test.TcpTestSucceeded) {
+                    Write-Host "⚠️  إعادة تفعيل RDP..."
+                    Restart-Service -Name "TermService" -Force
+                }
+            } catch {
+                Write-Host "⚠️  خطأ في الاختبار، إعادة التشغيل..."
+                Restart-Service -Name "TermService" -Force
+            }
+            
+            # انتظار حتى الفحص التالي
+            Start-Sleep -Seconds $checkInterval
+        }
+        
+        Write-Host "⏰ انتهت المدة - إيقاف السيرفر"
+
+    - name: التنظيف النهائي
+      if: always()
+      run: |
+        Write-Host "🧹 جاري التنظيف..."
+        # تعطيل RDP
+        Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 1 -Force
+        
+        # حذف قواعد الجدار الناري
+        netsh advfirewall firewall delete rule name="PublicRDP" 2>&1 | Out-Null
+        netsh advfirewall firewall delete rule name="PublicRDP-UDP" 2>&1 | Out-Null
+        
+        # حذف المستخدمين
+        try {
+            Remove-LocalUser -Name $env:USERNAME -ErrorAction SilentlyContinue
+        } catch { }
+        
+        Write-Host "✅ تم التنظيف بنجاح"
