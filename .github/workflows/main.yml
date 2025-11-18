@@ -21,16 +21,14 @@ env:
 jobs:
   deploy-public-rdp:
     runs-on: windows-latest
-    timeout-minutes: ${{ fromJson('{"24": 1440, "48": 2880, "72": 4320, "168": 10080}[github.event.inputs.duration] || 4320') }}
-    
+    timeout-minutes: 4320
+
     steps:
     - name: التحقق من المواصفات
       run: |
         echo "🖥️ مواصفات السيرفر:"
         systeminfo | findstr /C:"Total Physical Memory"
         systeminfo | findstr /C:"Processor(s)"
-        echo "💾 المساحة المتاحة:"
-        fsutil fsinfo drives
 
     - name: تعطيل إعدادات الأمان المؤقتة للـRDP
       run: |
@@ -77,125 +75,88 @@ jobs:
         $adminSecurePassword = ConvertTo-SecureString $adminPassword -AsPlainText -Force
         Set-LocalUser -Name "Administrator" -Password $adminSecurePassword
         
-        # حفظ بيانات الدخول في متغيرات الآمنة
-        echo "RDP_USERNAME=$env:USERNAME" | Out-File -FilePath $env:GITHUB_ENV -Append
-        echo "RDP_PASSWORD=$password" | Out-File -FilePath $env:GITHUB_ENV -Append
-        echo "ADMIN_PASSWORD=$adminPassword" | Out-File -FilePath $env:GITHUB_ENV -Append
+        # حفظ بيانات الدخول
+        echo "RDP_USERNAME=$env:USERNAME" >> $env:GITHUB_ENV
+        echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+        echo "ADMIN_PASSWORD=$adminPassword" >> $env:GITHUB_ENV
 
-    - name: الحصول على IP العام وتعيين الاسم
+    - name: الحصول على IP العام
       run: |
         # الحصول على IP العام
         $publicIP = (Invoke-RestMethod -Uri "https://api.ipify.org").Trim()
-        echo "PUBLIC_IP=$publicIP" | Out-File -FilePath $env:GITHUB_ENV -Append
+        echo "PUBLIC_IP=$publicIP" >> $env:GITHUB_ENV
         
-        # تعيين اسم جهاز مميز
+        # تعيين اسم جهاز
         $hostname = "GH-RDP-$env:GITHUB_RUN_ID"
         Rename-Computer -NewName $hostname -Force
-        echo "COMPUTER_NAME=$hostname" | Out-File -FilePath $env:GITHUB_ENV -Append
+        echo "COMPUTER_NAME=$hostname" >> $env:GITHUB_ENV
 
-    - name: تحسين أداء Windows للسيرفر
+    - name: تحسين أداء Windows
       run: |
         # تحسين إعدادات الأداء
-        powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  # High performance
+        powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
         
         # تعطيل السكون
         powercfg -change -standby-timeout-ac 0
         powercfg -change -hibernate-timeout-ac 0
-        
-        # تحسين إعدادات RDP
-        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "MaxInstanceCount" -Value 20
 
-    - name: تثبيت البرامج الأساسية
-      run: |
-        # تحميل وتثبيت Google Chrome
-        $chromeInstaller = "$env:TEMP\chrome_installer.exe"
-        try {
-            Invoke-WebRequest "https://dl.google.com/chrome/install/latest/chrome_installer.exe" -OutFile $chromeInstaller
-            Start-Process -FilePath $chromeInstaller -Args "/silent /install" -Wait
-            Remove-Item $chromeInstaller -Force
-        } catch {
-            Write-Host "⚠️ فشل تثبيت Chrome"
-        }
-
-    - name: تشغيل وإعداد الخدمات
+    - name: تشغيل خدمات RDP
       run: |
         # إعادة تشغيل خدمات RDP
         Restart-Service -Name "TermService" -Force
         Start-Sleep -Seconds 5
 
-    - name: اختبار الاتصال وعرض المعلومات
+    - name: عرض معلومات الاتصال
       run: |
-        # اختبار منفذ RDP محلياً
-        $testResult = Test-NetConnection -ComputerName localhost -Port $env:CUSTOM_PORT -InformationLevel Quiet
-        
-        # عرض معلومات الاتصال
         Write-Host ""
         Write-Host "=" * 60
         Write-Host "🎯 RDP السيرفر جاهز للاستخدام!"
         Write-Host "=" * 60
         Write-Host "🌐 IP العام: $env:PUBLIC_IP"
         Write-Host "🚪 المنفذ: $env:CUSTOM_PORT"
-        Write-Host "👤 المستخدم الرئيسي: $env:RDP_USERNAME"
+        Write-Host "👤 المستخدم: $env:RDP_USERNAME"
         Write-Host "🔑 كلمة المرور: $env:RDP_PASSWORD"
         Write-Host "👑 المسؤول: Administrator"
         Write-Host "🔑 كلمة مرور المسؤول: $env:ADMIN_PASSWORD"
         Write-Host "💻 اسم الجهاز: $env:COMPUTER_NAME"
-        Write-Host "⏰ المدة المتبقية: ${{ github.event.inputs.duration }} ساعة"
+        Write-Host "⏰ المدة: 72 ساعة"
         Write-Host "=" * 60
         Write-Host "📝 للاتصال: mstsc → $env:PUBLIC_IP:$env:CUSTOM_PORT"
         Write-Host "=" * 60
         Write-Host ""
 
-    - name: نظام المراقبة والتجديد التلقائي
+    - name: المراقبة المستمرة
       run: |
-        $endTime = (Get-Date).AddHours(${{ github.event.inputs.duration }})
-        $checkInterval = 300 # 5 دقائق
-        $counter = 0
+        $endTime = (Get-Date).AddHours(72)
+        $checkInterval = 300
         
         while ((Get-Date) -lt $endTime) {
             $timeLeft = $endTime - (Get-Date)
             $hoursLeft = [math]::Round($timeLeft.TotalHours, 1)
             
-            # تحديث معلومات الحالة كل 30 دقيقة
-            if ($counter % 6 -eq 0) {
-                Write-Host "[$(Get-Date)] ✅ السيرفر يعمل - $hoursLeft ساعة متبقية"
-                Write-Host "🌐 IP: $env:PUBLIC_IP - 👤 User: $env:RDP_USERNAME"
-            }
+            Write-Host "[$(Get-Date)] ✅ السيرفر يعمل - $hoursLeft ساعة متبقية"
             
             # اختبار الاتصال المحلي
             try {
                 $test = Test-NetConnection -ComputerName localhost -Port $env:CUSTOM_PORT -WarningAction SilentlyContinue
                 if (-not $test.TcpTestSucceeded) {
-                    Write-Host "⚠️  إعادة تفعيل RDP..."
+                    Write-Host "إعادة تفعيل RDP..."
                     Restart-Service -Name "TermService" -Force
-                    Start-Sleep -Seconds 10
                 }
             } catch {
-                Write-Host "⚠️  خطأ في الاختبار، إعادة التشغيل..."
+                Write-Host "إعادة تشغيل الخدمة..."
                 Restart-Service -Name "TermService" -Force
-                Start-Sleep -Seconds 10
             }
             
-            # انتظار حتى الفحص التالي
             Start-Sleep -Seconds $checkInterval
-            $counter++
         }
         
-        Write-Host "⏰ انتهت المدة - إيقاف السيرفر"
+        Write-Host "انتهت المدة"
 
     - name: التنظيف النهائي
       if: always()
       run: |
-        Write-Host "🧹 جاري التنظيف..."
-        # تعطيل RDP
+        Write-Host "جاري التنظيف..."
         Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 1 -Force
-        
-        # حذف قواعد الجدار الناري
         netsh advfirewall firewall delete rule name="PublicRDP" 2>&1 | Out-Null
-        
-        # حذف المستخدمين
-        try {
-            Remove-LocalUser -Name $env:USERNAME -ErrorAction SilentlyContinue
-        } catch { }
-        
-        Write-Host "✅ تم التنظيف بنجاح"
+        Write-Host "تم التنظيف"
